@@ -3,23 +3,44 @@
 // This enables autocomplete, go to definition, etc.
 
 import { serve } from "https://deno.land/std@0.131.0/http/server.ts";
+import { parseISO, isBefore, addHours } from "https://esm.sh/date-fns";
+import { flatten } from "https://esm.sh/ramda";
 import { supabaseClient } from "../_shared/supabase-client.ts";
 
-serve(async (req: Request) => {
-  const { sendId } = await req.json();
+type FileObject = {
+  name: string;
+  created_at: string;
+  path: string;
+};
 
+serve(async () => {
   try {
-    const { data } = await supabaseClient.storage.from("sends").list(sendId);
-    console.log(data);
-    if (!data?.length) {
+    const { data: folders } = await supabaseClient.storage.from("sends").list();
+    const folderNames = folders?.map(({ name }) => name);
+    if (!folderNames) {
       return new Response(undefined, {
         headers: { "Content-Type": "application/json" },
         status: 204,
       });
     }
-    const fileNames = data.map((file) => `${sendId}/${file.name}`);
-    await supabaseClient.storage.from("sends").remove(fileNames);
-
+    const allFiles: FileObject[] = flatten(
+      await Promise.all(
+        folderNames.map((folderName) => getFilesForFolder(folderName))
+      )
+    );
+    const expiredFiles: FileObject[] = allFiles.filter((file) =>
+      isBefore(parseISO(file.created_at, {}), addHours(new Date(), -24))
+    );
+    console.log(`Deleting ${expiredFiles.length}/${allFiles.length} files`);
+    if (!expiredFiles?.length) {
+      return new Response(undefined, {
+        headers: { "Content-Type": "application/json" },
+        status: 204,
+      });
+    }
+    await supabaseClient.storage
+      .from("sends")
+      .remove(expiredFiles.map(({ path }) => path));
     return new Response(JSON.stringify({ success: true }), {
       headers: { "Content-Type": "application/json" },
       status: 200,
@@ -31,6 +52,14 @@ serve(async (req: Request) => {
     });
   }
 });
+
+async function getFilesForFolder(folderName: string) {
+  const { data } = await supabaseClient.storage.from("sends").list(folderName);
+  return data?.map((file) => ({
+    path: `${folderName}/${file.name}`,
+    ...file,
+  }));
+}
 
 // To invoke:
 // curl -i --location --request POST 'http://localhost:54321/functions/v1/' \
